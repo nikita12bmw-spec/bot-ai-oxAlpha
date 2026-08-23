@@ -11,15 +11,15 @@ from openai import AsyncOpenAI
 
 # ==================== НАСТРОЙКИ ====================
 # Токен бота от @BotFather
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "ВАШ_TELEGRAM_ТОКЕН")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8757713372:AAGDgGmXGvbJvylJeNBEKPxrqsH52gdDKaQ")
 
 # API-ключ ИИ — провайдер TokenRa (tokenra.io)
-AI_API_KEY = os.getenv("AI_API_KEY", "ВАШ_API_КЛЮЧ_С_TOKENRA")
-AI_BASE_URL = os.getenv("AI_BASE_URL", "https://tokenra.io/v1")
-AI_MODEL = os.getenv("AI_MODEL", "artsdance-2-5-pro-260801")
+AI_API_KEY = os.getenv("AI_API_KEY", "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")
+AI_BASE_URL = os.getenv("AI_BASE_URL", "https://openrouter.ai/api/v1")
+AI_MODEL = os.getenv("AI_MODEL", "stealth/ox-alpha")
 
 # Строка подключения к PostgreSQL (даёт Neon/Render при создании базы)
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_MrXCLfIg0G9e@ep-wispy-forest-ayyzao6p-pooler.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
 
 # Имя и характер бота
 BOT_NAME = "Ox Alpha"
