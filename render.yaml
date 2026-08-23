@@ -8,7 +8,7 @@ services:
     envVars:
       - key: 8757713372:AAGDgGmXGvbJvylJeNBEKPxrqsH52gdDKaQ
         sync: false
-      - key: AI_API_KEY
+      - key: sk-ueUQBfXC4LORyWQImcdd2Kc014V4dpL5jgeL0nGwArSZxxUT
         sync: false
       - key: AI_MODEL
         value: artsdance-2-5-pro-260801
