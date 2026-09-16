@@ -1,9 +1,14 @@
 import os
 import asyncio
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import logging
 
 import psycopg
+import uvicorn
+
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
 
 from telegram import Update
 from telegram.ext import (
@@ -25,10 +30,39 @@ from google.genai import types
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 DATABASE_URL = os.environ["DATABASE_URL"]
+WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
+
+RENDER_URL = os.environ.get(
+    "RENDER_EXTERNAL_URL",
+    "https://bot-ai-oxalpha.onrender.com"
+)
+
+PORT = int(os.environ.get("PORT", 10000))
+
+WEBHOOK_PATH = f"/telegram/{WEBHOOK_SECRET}"
 
 MODEL = "gemini-2.5-flash"
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+
+# =========================================================
+# LOGGING
+# =========================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# GEMINI
+# =========================================================
+
+client = genai.Client(
+    api_key=GEMINI_API_KEY
+)
 
 google_search_tool = types.Tool(
     google_search=types.GoogleSearch()
@@ -44,7 +78,9 @@ def get_db():
 
 
 def init_db():
+
     with get_db() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute("""
@@ -67,11 +103,13 @@ def init_db():
 
         conn.commit()
 
-    print("Database initialized!")
+    logger.info("Database initialized!")
 
 
 def ensure_user(user_id: int):
+
     with get_db() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute("""
@@ -83,20 +121,36 @@ def ensure_user(user_id: int):
         conn.commit()
 
 
-def save_message(user_id: int, role: str, content: str):
+def save_message(
+    user_id: int,
+    role: str,
+    content: str
+):
+
     with get_db() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute("""
-                INSERT INTO messages (user_id, role, content)
+                INSERT INTO messages
+                (user_id, role, content)
                 VALUES (%s, %s, %s)
-            """, (user_id, role, content))
+            """, (
+                user_id,
+                role,
+                content
+            ))
 
         conn.commit()
 
 
-def get_history(user_id: int, limit: int = 20):
+def get_history(
+    user_id: int,
+    limit: int = 20
+):
+
     with get_db() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute("""
@@ -105,16 +159,22 @@ def get_history(user_id: int, limit: int = 20):
                 WHERE user_id = %s
                 ORDER BY created_at DESC
                 LIMIT %s
-            """, (user_id, limit))
+            """, (
+                user_id,
+                limit
+            ))
 
             rows = cur.fetchall()
 
     rows.reverse()
+
     return rows
 
 
 def get_memory(user_id: int):
+
     with get_db() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute("""
@@ -131,21 +191,31 @@ def get_memory(user_id: int):
     return ""
 
 
-def set_memory(user_id: int, memory: str):
+def set_memory(
+    user_id: int,
+    memory: str
+):
+
     with get_db() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute("""
                 UPDATE users
                 SET memory = %s
                 WHERE user_id = %s
-            """, (memory, user_id))
+            """, (
+                memory,
+                user_id
+            ))
 
         conn.commit()
 
 
 def reset_history(user_id: int):
+
     with get_db() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute("""
@@ -157,7 +227,9 @@ def reset_history(user_id: int):
 
 
 def reset_memory(user_id: int):
+
     with get_db() as conn:
+
         with conn.cursor() as cur:
 
             cur.execute("""
@@ -170,7 +242,7 @@ def reset_memory(user_id: int):
 
 
 # =========================================================
-# GEMINI
+# GEMINI REQUEST
 # =========================================================
 
 async def ask_gemini(
@@ -184,25 +256,31 @@ async def ask_gemini(
 
     contents = []
 
-    # История
+    # История пользователя
     for role, content in history:
 
         if role == "user":
+
             contents.append(
                 types.Content(
                     role="user",
                     parts=[
-                        types.Part.from_text(text=content)
+                        types.Part.from_text(
+                            text=content
+                        )
                     ]
                 )
             )
 
         elif role == "model":
+
             contents.append(
                 types.Content(
                     role="model",
                     parts=[
-                        types.Part.from_text(text=content)
+                        types.Part.from_text(
+                            text=content
+                        )
                     ]
                 )
             )
@@ -214,7 +292,9 @@ async def ask_gemini(
         current_parts.extend(extra_parts)
 
     current_parts.append(
-        types.Part.from_text(text=text)
+        types.Part.from_text(
+            text=text
+        )
     )
 
     contents.append(
@@ -224,46 +304,66 @@ async def ask_gemini(
         )
     )
 
-    system_prompt = """
+    system_prompt = f"""
 Ты дружелюбный ИИ-помощник в Telegram.
 
-Отвечай понятно и по делу.
+Отвечай понятно, естественно и по делу.
 
 Если вопрос требует свежей или актуальной информации,
 используй Google Search.
 
 Не выдавай непроверенные факты за достоверные.
 
-У тебя есть долговременная память о пользователе.
-Используй её только если она действительно относится
+У тебя есть долговременная память пользователя.
+Используй её только тогда, когда она относится
 к текущему разговору.
 
 Долговременная память пользователя:
-""" + (memory if memory else "Память пока пустая.")
 
-    response = await asyncio.to_thread(
-        client.models.generate_content,
-        model=MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            tools=[google_search_tool],
-            system_instruction=system_prompt,
-        ),
-    )
+{memory if memory else "Память пока пустая."}
+"""
 
-    return response.text
+    try:
+
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                tools=[google_search_tool],
+                system_instruction=system_prompt,
+            ),
+        )
+
+        if not response.text:
+
+            raise RuntimeError(
+                "Gemini returned an empty response"
+            )
+
+        return response.text
+
+    except Exception as e:
+
+        logger.exception(
+            "GEMINI ERROR"
+        )
+
+        raise e
 
 
 # =========================================================
-# LONG-TERM MEMORY
+# MEMORY
 # =========================================================
 
-async def update_memory(user_id: int, user_text: str):
+async def update_memory(
+    user_id: int,
+    user_text: str
+):
 
     old_memory = get_memory(user_id)
 
-    # Не вызываем отдельный запрос для обычной болтовни.
-    memory_words = [
+    memory_triggers = [
         "запомни",
         "помни",
         "меня зовут",
@@ -276,27 +376,36 @@ async def update_memory(user_id: int, user_text: str):
         "я использую",
     ]
 
-    if not any(word in user_text.lower() for word in memory_words):
+    text_lower = user_text.lower()
+
+    if not any(
+        word in text_lower
+        for word in memory_triggers
+    ):
         return
 
     prompt = f"""
-Ты управляешь долговременной памятью Telegram-бота.
+Ты управляешь долговременной памятью пользователя.
 
 Старая память:
 {old_memory}
 
-Новое сообщение пользователя:
+Новое сообщение:
 {user_text}
 
-Обнови память.
+Обнови память пользователя.
 
 Правила:
+
 - сохраняй только полезные долгосрочные факты;
+- сохраняй предпочтения и проекты пользователя;
 - не сохраняй случайную болтовню;
-- не удаляй полезные старые факты без причины;
-- пиши кратко;
-- обычный текст без пояснений;
-- если нового полезного факта нет, верни старую память.
+- не сохраняй пароли, токены или секретные ключи;
+- не удаляй полезные старые факты;
+- пиши максимально кратко;
+- не добавляй пояснения.
+
+Верни только новую память.
 """
 
     try:
@@ -304,31 +413,52 @@ async def update_memory(user_id: int, user_text: str):
         response = await asyncio.to_thread(
             client.models.generate_content,
             model=MODEL,
-            contents=prompt,
+            contents=prompt
         )
 
         new_memory = response.text.strip()
 
         if new_memory:
-            set_memory(user_id, new_memory)
 
-    except Exception as e:
-        print("MEMORY ERROR:", repr(e))
+            set_memory(
+                user_id,
+                new_memory
+            )
+
+            logger.info(
+                "Memory updated for user %s",
+                user_id
+            )
+
+    except Exception:
+
+        logger.exception(
+            "MEMORY ERROR"
+        )
 
 
 # =========================================================
 # TELEGRAM HELPERS
 # =========================================================
 
-async def send_long_message(message, text):
+async def send_long_message(
+    message,
+    text: str
+):
 
     max_length = 4000
 
     if len(text) <= max_length:
+
         await message.reply_text(text)
         return
 
-    for i in range(0, len(text), max_length):
+    for i in range(
+        0,
+        len(text),
+        max_length
+    ):
+
         await message.reply_text(
             text[i:i + max_length]
         )
@@ -338,7 +468,10 @@ async def send_long_message(message, text):
 # COMMANDS
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user_id = update.effective_user.id
 
@@ -346,27 +479,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Привет! 🧠\n\n"
-        "Я ИИ-бот на Gemini.\n"
-        "У меня есть интернет через Google Search, "
-        "память, история диалога и анализ файлов.\n\n"
-        "Просто напиши сообщение или отправь фото/.txt 📸📄"
+        "Я Ox Alpha AI.\n\n"
+        "У меня есть:\n"
+        "🌐 интернет через Google Search\n"
+        "🧠 долговременная память\n"
+        "💬 отдельная история пользователей\n"
+        "📸 анализ фото\n"
+        "📄 чтение TXT\n\n"
+        "/reset — очистить историю\n"
+        "/forget — забыть память"
     )
 
 
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def reset(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user_id = update.effective_user.id
 
     ensure_user(user_id)
+
     reset_history(user_id)
 
     await update.message.reply_text(
-        "История текущего диалога очищена 🧹\n"
+        "История очищена 🧹\n"
         "Долговременная память сохранена."
     )
 
 
-async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def forget(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     user_id = update.effective_user.id
 
@@ -388,7 +533,10 @@ async def message_handler(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not update.message or not update.message.text:
+    if (
+        not update.message
+        or not update.message.text
+    ):
         return
 
     user_id = update.effective_user.id
@@ -396,13 +544,15 @@ async def message_handler(
 
     ensure_user(user_id)
 
-    await update.message.chat.send_action("typing")
+    await update.message.chat.send_action(
+        "typing"
+    )
 
     try:
 
         answer = await ask_gemini(
-            user_id=user_id,
-            text=text
+            user_id,
+            text
         )
 
         save_message(
@@ -429,11 +579,14 @@ async def message_handler(
 
     except Exception as e:
 
-        print("ERROR:", repr(e))
+        logger.exception(
+            "MESSAGE ERROR"
+        )
 
         await update.message.reply_text(
-            "Произошла ошибка 😵\n"
-            "Попробуй ещё раз."
+            "Ошибка при обращении к Gemini 😵\n\n"
+            f"Причина: {type(e).__name__}\n"
+            "Подробности есть в логах Render."
         )
 
 
@@ -446,31 +599,36 @@ async def photo_handler(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not update.message or not update.message.photo:
+    if (
+        not update.message
+        or not update.message.photo
+    ):
         return
 
     user_id = update.effective_user.id
 
     ensure_user(user_id)
 
-    await update.message.chat.send_action("typing")
+    await update.message.chat.send_action(
+        "typing"
+    )
 
     try:
 
         photo = update.message.photo[-1]
 
-        file = await context.bot.get_file(
+        telegram_file = await context.bot.get_file(
             photo.file_id
         )
 
-        image_bytes = await file.download_as_bytearray()
+        image_bytes = (
+            await telegram_file.download_as_bytearray()
+        )
 
-        caption = update.message.caption
-
-        if caption:
-            prompt = caption
-        else:
-            prompt = "Проанализируй это изображение."
+        prompt = (
+            update.message.caption
+            or "Проанализируй это изображение."
+        )
 
         image_part = types.Part.from_bytes(
             data=bytes(image_bytes),
@@ -478,8 +636,8 @@ async def photo_handler(
         )
 
         answer = await ask_gemini(
-            user_id=user_id,
-            text=prompt,
+            user_id,
+            prompt,
             extra_parts=[image_part]
         )
 
@@ -502,15 +660,18 @@ async def photo_handler(
 
     except Exception as e:
 
-        print("PHOTO ERROR:", repr(e))
+        logger.exception(
+            "PHOTO ERROR"
+        )
 
         await update.message.reply_text(
-            "Не получилось обработать фото 😵"
+            "Не получилось обработать фото 😵\n\n"
+            f"Ошибка: {type(e).__name__}"
         )
 
 
 # =========================================================
-# TXT FILE
+# TXT
 # =========================================================
 
 async def txt_handler(
@@ -518,7 +679,10 @@ async def txt_handler(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if not update.message or not update.message.document:
+    if (
+        not update.message
+        or not update.message.document
+    ):
         return
 
     document = update.message.document
@@ -526,43 +690,59 @@ async def txt_handler(
     filename = document.file_name or ""
 
     if not filename.lower().endswith(".txt"):
+
         await update.message.reply_text(
-            "Пока я умею читать только .txt файлы 📄"
+            "Пока поддерживаются только .txt файлы 📄"
         )
+
         return
 
     user_id = update.effective_user.id
 
     ensure_user(user_id)
 
-    await update.message.chat.send_action("typing")
+    await update.message.chat.send_action(
+        "typing"
+    )
 
     try:
 
-        file = await context.bot.get_file(
+        telegram_file = await context.bot.get_file(
             document.file_id
         )
 
-        file_bytes = await file.download_as_bytearray()
+        file_bytes = (
+            await telegram_file.download_as_bytearray()
+        )
 
-        # Ограничиваем размер текста
         if len(file_bytes) > 500_000:
+
             await update.message.reply_text(
-                "Файл слишком большой. "
+                "Файл слишком большой.\n"
                 "Максимум сейчас — 500 КБ."
             )
+
             return
 
         try:
-            text_content = bytes(file_bytes).decode("utf-8")
+
+            file_text = bytes(
+                file_bytes
+            ).decode("utf-8")
 
         except UnicodeDecodeError:
-            text_content = bytes(file_bytes).decode(
+
+            file_text = bytes(
+                file_bytes
+            ).decode(
                 "cp1251",
                 errors="replace"
             )
 
-        caption = update.message.caption or ""
+        caption = (
+            update.message.caption
+            or ""
+        )
 
         prompt = f"""
 Пользователь отправил TXT-файл.
@@ -570,20 +750,22 @@ async def txt_handler(
 Имя файла:
 {filename}
 
-Комментарий пользователя:
+Комментарий:
 {caption}
 
-Содержимое файла:
+Содержимое:
 
-{text_content}
+{file_text}
 
 Проанализируй файл и ответь на запрос пользователя.
-Если отдельного запроса нет — кратко объясни, что находится в файле.
+
+Если отдельного запроса нет,
+кратко объясни содержимое файла.
 """
 
         answer = await ask_gemini(
-            user_id=user_id,
-            text=prompt
+            user_id,
+            prompt
         )
 
         save_message(
@@ -605,63 +787,106 @@ async def txt_handler(
 
     except Exception as e:
 
-        print("TXT ERROR:", repr(e))
+        logger.exception(
+            "TXT ERROR"
+        )
 
         await update.message.reply_text(
-            "Не получилось прочитать TXT-файл 😵"
+            "Не получилось прочитать TXT 😵\n\n"
+            f"Ошибка: {type(e).__name__}"
         )
 
 
 # =========================================================
-# RENDER HEALTH CHECK
+# WEBHOOK
 # =========================================================
 
-class HealthHandler(BaseHTTPRequestHandler):
+application = (
+    Application.builder()
+    .token(TELEGRAM_TOKEN)
+    .updater(None)
+    .build()
+)
 
-    def do_GET(self):
 
-        self.send_response(200)
-        self.end_headers()
+async def telegram_webhook(
+    request: Request
+):
 
-        self.wfile.write(
-            b"Bot is alive!"
+    try:
+
+        data = await request.json()
+
+        update = Update.de_json(
+            data,
+            application.bot
         )
 
-    def log_message(self, format, *args):
-        return
+        await application.update_queue.put(
+            update
+        )
+
+        return PlainTextResponse(
+            "OK"
+        )
+
+    except Exception:
+
+        logger.exception(
+            "WEBHOOK ERROR"
+        )
+
+        return PlainTextResponse(
+            "ERROR",
+            status_code=500
+        )
 
 
-def start_health_server():
+async def health(
+    request: Request
+):
 
-    port = int(
-        os.environ.get("PORT", 10000)
+    return PlainTextResponse(
+        "Ox Alpha AI is alive!"
     )
-
-    server = HTTPServer(
-        ("0.0.0.0", port),
-        HealthHandler
-    )
-
-    print(
-        f"Health server started on port {port}"
-    )
-
-    server.serve_forever()
 
 
 # =========================================================
-# MAIN
+# WEB APP
 # =========================================================
 
-async def main():
+routes = [
+    Route(
+        WEBHOOK_PATH,
+        telegram_webhook,
+        methods=["POST"]
+    ),
+
+    Route(
+        "/",
+        health,
+        methods=["GET"]
+    ),
+
+    Route(
+        "/health",
+        health,
+        methods=["GET"]
+    ),
+]
+
+web_app = Starlette(
+    routes=routes
+)
+
+
+# =========================================================
+# STARTUP
+# =========================================================
+
+async def startup():
 
     init_db()
-
-    application = (
-        Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .build()
-    )
 
     application.add_handler(
         CommandHandler(
@@ -705,26 +930,73 @@ async def main():
         )
     )
 
-    print("Telegram bot started!")
-
     await application.initialize()
+
     await application.start()
-    await application.updater.start_polling()
 
-    await asyncio.Event().wait()
-
-
-# =========================================================
-# START
-# =========================================================
-
-if __name__ == "__main__":
-
-    health_thread = threading.Thread(
-        target=start_health_server,
-        daemon=True
+    webhook_url = (
+        RENDER_URL.rstrip("/")
+        + WEBHOOK_PATH
     )
 
-    health_thread.start()
+    await application.bot.set_webhook(
+        url=webhook_url,
+        allowed_updates=Update.ALL_TYPES
+    )
+
+    logger.info(
+        "Telegram webhook set: %s",
+        webhook_url
+    )
+
+    logger.info(
+        "Ox Alpha AI started!"
+    )
+
+
+async def shutdown():
+
+    try:
+
+        await application.bot.delete_webhook()
+
+    except Exception:
+
+        logger.exception(
+            "Failed to delete webhook"
+        )
+
+    await application.stop()
+
+    await application.shutdown()
+
+
+# =========================================================
+# RUN
+# =========================================================
+
+async def main():
+
+    await startup()
+
+    config = uvicorn.Config(
+        web_app,
+        host="0.0.0.0",
+        port=PORT,
+        log_level="info"
+    )
+
+    server = uvicorn.Server(config)
+
+    try:
+
+        await server.serve()
+
+    finally:
+
+        await shutdown()
+
+
+if __name__ == "__main__":
 
     asyncio.run(main())
