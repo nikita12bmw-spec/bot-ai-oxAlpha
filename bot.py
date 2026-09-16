@@ -245,11 +245,33 @@ def reset_memory(user_id: int):
 # GEMINI REQUEST
 # =========================================================
 
-async def ask_gemini(
-    user_id: int,
-    text: str,
-    extra_parts=None
-):
+async def telegram_webhook(request):
+    print("🔥 WEBHOOK REQUEST RECEIVED", flush=True)
+
+    try:
+        data = await request.json()
+        print("📦 UPDATE RECEIVED", flush=True)
+
+        update = Update.de_json(data, application.bot)
+
+        if update.message:
+            print(
+                f"👤 MESSAGE: {update.message.text!r}",
+                flush=True
+            )
+
+        await application.update_queue.put(update)
+
+        print("✅ UPDATE PUT INTO QUEUE", flush=True)
+
+        return JSONResponse({"ok": True})
+
+    except Exception as e:
+        print(f"❌ WEBHOOK ERROR: {type(e).__name__}: {e}", flush=True)
+        return JSONResponse(
+            {"ok": False, "error": str(e)},
+            status_code=500
+        )
 
     history = get_history(user_id)
     memory = get_memory(user_id)
