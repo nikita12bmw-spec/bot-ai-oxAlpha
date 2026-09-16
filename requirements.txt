@@ -1,3 +1,5 @@
 python-telegram-bot
 google-genai
 psycopg[binary]
+starlette
+uvicorn
