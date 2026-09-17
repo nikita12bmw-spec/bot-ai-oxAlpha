@@ -40,7 +40,7 @@ RENDER_URL = os.environ.get(
 PORT = int(os.environ.get("PORT", 10000))
 
 WEBHOOK_PATH = f"/telegram/{WEBHOOK_SECRET}"
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.6-flash"
 
 
 # =========================================================
