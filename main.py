@@ -58,6 +58,7 @@ format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 logger = logging.getLogger(name)
 
 def get_db():
+    return
 return psycopg.connect(DATABASE_URL)
 
 def init_db():
