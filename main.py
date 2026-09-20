@@ -48,10 +48,12 @@ OPENROUTER_VISION_MODEL = "openrouter/free"
 HISTORY_LIMIT = 8
 HISTORY_CHARS_LIMIT = 6000
 MEMORY_LIMIT = 2500
-WEB_CONTEXT_LIMIT = 5000
-WEB_RESULTS_LIMIT = 6
 
-MAX_OUTPUT_TOKENS = 1200
+WEB_CONTEXT_LIMIT = 4000
+WEB_RESULTS_LIMIT = 5
+
+MAX_OUTPUT_TOKENS = 1600
+SEARCH_QUERY_TOKENS = 120
 MEMORY_OUTPUT_TOKENS = 250
 
 
@@ -572,6 +574,81 @@ def wants_web_search(text: str) -> bool:
     )
 
 
+async def make_search_query(
+    text: str,
+) -> str:
+    prompt = f"""
+Преобразуй запрос пользователя в короткий
+и точный поисковый запрос для веб-поисковика.
+
+Тебе НЕ нужно отвечать на вопрос.
+Тебе нужно только составить поисковую строку.
+
+Учитывай:
+- тему запроса;
+- нужный период времени;
+- страну или язык, если они важны;
+- конкретные названия;
+- актуальность информации.
+
+Если пользователь просит научные данные,
+ищи именно научные публикации и авторитетные
+источники.
+
+Не добавляй объяснения.
+Не используй кавычки.
+Верни только одну строку поискового запроса.
+
+Запрос пользователя:
+{text[:2000]}
+"""
+
+    payload = {
+        "model": GROQ_TEXT_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Ты генератор поисковых запросов. "
+                    "Отвечай только поисковой строкой."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        "max_tokens": SEARCH_QUERY_TOKENS,
+        "temperature": 0,
+    }
+
+    data = await groq_request(
+        payload,
+        60,
+    )
+
+    query = (
+        data["choices"][0]["message"]["content"]
+        .strip()
+        .replace("\n", " ")
+    )
+
+    query = re.sub(
+        r"\s+",
+        " ",
+        query,
+    )
+
+    query = query.strip(
+        "\"'`"
+    )
+
+    if not query:
+        return text[:600]
+
+    return query[:600]
+
+
 async def freeserp_search(
     query: str,
 ) -> str:
@@ -617,7 +694,7 @@ async def freeserp_search(
 
     if not results:
         return (
-            "FreeSerp не вернул результатов "
+            "Поисковик не вернул результатов "
             "по этому запросу."
         )
 
@@ -682,6 +759,7 @@ async def freeserp_search(
 async def ask_groq_with_web(
     user_id: int,
     text: str,
+    search_query: str,
     web_context: str,
 ):
     history = get_compact_history(user_id)
@@ -692,14 +770,32 @@ async def ask_groq_with_web(
             "role": "system",
             "content": (
                 "Ты дружелюбный ИИ-помощник "
-                "в Telegram.\n"
+                "в Telegram.\n\n"
                 "Пользователь запросил актуальную "
-                "информацию.\n"
-                "Используй результаты веб-поиска ниже.\n"
-                "Не придумывай отсутствующие факты.\n"
-                "Если информации недостаточно или "
-                "источники противоречат друг другу, "
-                "скажи об этом.\n\n"
+                "информацию из интернета.\n"
+                "Ниже находятся результаты веб-поиска.\n\n"
+                "Твоя задача — самостоятельно "
+                "проанализировать найденные материалы "
+                "и дать пользователю нормальный, "
+                "понятный ответ.\n\n"
+                "ВАЖНЫЕ ПРАВИЛА:\n"
+                "1. Используй результаты поиска как "
+                "основной источник актуальной информации.\n"
+                "2. Не придумывай факты, даты, цифры, "
+                "названия исследований или события.\n"
+                "3. Никогда не придумывай URL.\n"
+                "4. Если указываешь ссылку, она должна "
+                "существовать среди URL в результатах поиска.\n"
+                "5. Если результаты плохие или не отвечают "
+                "на вопрос, честно скажи об этом.\n"
+                "6. Если источники противоречат друг другу, "
+                "укажи на противоречие.\n"
+                "7. Не рассказывай пользователю о внутреннем "
+                "поисковом промпте.\n"
+                "8. Не говори, что у тебя нет доступа к интернету, "
+                "если результаты поиска были получены.\n"
+                "9. Отвечай непосредственно на исходный "
+                "запрос пользователя.\n\n"
                 "Память пользователя:\n"
                 f"{memory or 'Память пока пустая.'}"
             ),
@@ -722,10 +818,15 @@ async def ask_groq_with_web(
         {
             "role": "user",
             "content": (
-                "Запрос пользователя:\n"
-                f"{text[:1500]}\n\n"
+                "Исходный запрос пользователя:\n"
+                f"{text[:2000]}\n\n"
+                "Поисковый запрос, который был "
+                "сгенерирован для поисковика:\n"
+                f"{search_query[:600]}\n\n"
                 "Результаты веб-поиска:\n"
-                f"{web_context[:WEB_CONTEXT_LIMIT]}"
+                f"{web_context[:WEB_CONTEXT_LIMIT]}\n\n"
+                "Теперь дай пользователю полноценный "
+                "ответ на его исходный запрос."
             ),
         }
     )
@@ -904,13 +1005,23 @@ async def message_handler(
                 text,
             )
 
-            web_context = await freeserp_search(
+            search_query = await make_search_query(
                 text
+            )
+
+            logger.info(
+                "Generated search query: %s",
+                search_query,
+            )
+
+            web_context = await freeserp_search(
+                search_query
             )
 
             answer = await ask_groq_with_web(
                 user_id,
                 text,
+                search_query,
                 web_context,
             )
 
