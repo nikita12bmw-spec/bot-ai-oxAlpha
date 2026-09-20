@@ -13,11 +13,7 @@ from starlette.requests import Request
 from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 
-from telegram import (
-Update,
-InlineKeyboardButton,
-InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
 Application,
 CommandHandler,
@@ -27,315 +23,171 @@ ContextTypes,
 filters,
 )
 
-=========================================================
-
-НАСТРОЙКИ
-
-=========================================================
-
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 OPENROUTER_API_KEY = os.environ["OPENROUTER_API_KEY"]
 DATABASE_URL = os.environ["DATABASE_URL"]
-
-FreeSerp — keyless web search
+WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
 FREE_SERP_URL = "https://freeserp.ai/api.php"
-
-WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 RENDER_URL = os.environ.get(
 "RENDER_EXTERNAL_URL",
 "https://bot-ai-oxalpha.onrender.com"
 )
-
 PORT = int(os.environ.get("PORT", 10000))
-
 WEBHOOK_PATH = f"/telegram/{WEBHOOK_SECRET}"
 
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-
-Основная текстовая модель
-
 GROQ_TEXT_MODEL = "openai/gpt-oss-120b"
-
-Vision через OpenRouter
-
 OPENROUTER_VISION_MODEL = "openrouter/free"
 
-=========================================================
-
-ОГРАНИЧЕНИЯ КОНТЕКСТА
-
-=========================================================
-
-Раньше отправлялось до 20 сообщений.
-
-Теперь берём меньше, чтобы не убивать TPM.
-
 HISTORY_LIMIT = 8
-
-Максимум символов истории, реально отправляемых модели.
-
 HISTORY_CHARS_LIMIT = 6000
-
-Максимальная долговременная память.
-
 MEMORY_LIMIT = 2500
-
-Максимальный размер веб-контекста.
-
 WEB_CONTEXT_LIMIT = 5000
-
-Максимум результатов поиска.
-
 WEB_RESULTS_LIMIT = 6
-
-Максимальный ответ обычной модели.
-
 MAX_OUTPUT_TOKENS = 1200
-
-Максимальный ответ модели памяти.
-
 MEMORY_OUTPUT_TOKENS = 250
-
-=========================================================
-
-LOGGING
-
-=========================================================
 
 logging.basicConfig(
 level=logging.INFO,
-format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-
 logger = logging.getLogger(name)
-
-=========================================================
-
-DATABASE
-
-=========================================================
 
 def get_db():
 return psycopg.connect(DATABASE_URL)
 
 def init_db():
-
 with get_db() as conn:
+with conn.cursor() as cur:
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+user_id BIGINT PRIMARY KEY,
+memory TEXT DEFAULT '',
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+cur.execute("""
+CREATE TABLE IF NOT EXISTS messages (
+id SERIAL PRIMARY KEY,
+user_id BIGINT NOT NULL,
+role TEXT NOT NULL,
+content TEXT NOT NULL,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+""")
+conn.commit()
 
-    with conn.cursor() as cur:
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id BIGINT PRIMARY KEY,
-                memory TEXT DEFAULT '',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS messages (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-    conn.commit()
-
-logger.info("Database initialized!")
+logger.info("Database initialized")
 
 def ensure_user(user_id: int):
-
 with get_db() as conn:
+with conn.cursor() as cur:
+cur.execute("""
+INSERT INTO users (user_id)
+VALUES (%s)
+ON CONFLICT (user_id) DO NOTHING
+""", (user_id,))
+conn.commit()
 
-    with conn.cursor() as cur:
-
-        cur.execute("""
-            INSERT INTO users (user_id)
-            VALUES (%s)
-            ON CONFLICT (user_id) DO NOTHING
-        """, (user_id,))
-
-    conn.commit()
-
-def save_message(
-user_id: int,
-role: str,
-content: str,
-):
-
+def save_message(user_id: int, role: str, content: str):
 with get_db() as conn:
+with conn.cursor() as cur:
+cur.execute("""
+INSERT INTO messages (user_id, role, content)
+VALUES (%s, %s, %s)
+""", (user_id, role, content))
+conn.commit()
 
-    with conn.cursor() as cur:
-
-        cur.execute("""
-            INSERT INTO messages (user_id, role, content)
-            VALUES (%s, %s, %s)
-        """, (
-            user_id,
-            role,
-            content,
-        ))
-
-    conn.commit()
-
-def get_history(
-user_id: int,
-limit: int = HISTORY_LIMIT,
-):
-
+def get_history(user_id: int, limit: int = HISTORY_LIMIT):
 with get_db() as conn:
-
-    with conn.cursor() as cur:
-
-        cur.execute("""
-            SELECT role, content
-            FROM messages
-            WHERE user_id = %s
-            ORDER BY created_at DESC
-            LIMIT %s
-        """, (
-            user_id,
-            limit,
-        ))
-
-        rows = cur.fetchall()
+with conn.cursor() as cur:
+cur.execute("""
+SELECT role, content
+FROM messages
+WHERE user_id = %s
+ORDER BY created_at DESC
+LIMIT %s
+""", (user_id, limit))
+rows = cur.fetchall()
 
 rows.reverse()
-
 return rows
 
 def get_compact_history(user_id: int):
-
-"""
-Возвращает небольшую историю.
-
-Ограничиваем и количество сообщений,
-и общий объём текста.
-"""
-
-rows = get_history(
-    user_id,
-    HISTORY_LIMIT,
-)
-
+rows = get_history(user_id)
 result = []
-total_chars = 0
+total = 0
 
 for role, content in reversed(rows):
-
     if not content:
         continue
 
-    # Ограничиваем одно старое сообщение.
     content = content[:1800]
 
-    if total_chars + len(content) > HISTORY_CHARS_LIMIT:
+    if total + len(content) > HISTORY_CHARS_LIMIT:
         break
 
-    result.append(
-        (role, content)
-    )
-
-    total_chars += len(content)
+    result.append((role, content))
+    total += len(content)
 
 result.reverse()
-
 return result
 
 def get_memory(user_id: int):
-
 with get_db() as conn:
+with conn.cursor() as cur:
+cur.execute("""
+SELECT memory
+FROM users
+WHERE user_id = %s
+""", (user_id,))
+row = cur.fetchone()
 
-    with conn.cursor() as cur:
+return (row[0] or "")[:MEMORY_LIMIT] if row else ""
 
-        cur.execute("""
-            SELECT memory
-            FROM users
-            WHERE user_id = %s
-        """, (user_id,))
-
-        row = cur.fetchone()
-
-if row:
-    return (row[0] or "")[:MEMORY_LIMIT]
-
-return ""
-
-def set_memory(
-user_id: int,
-memory: str,
-):
-
+def set_memory(user_id: int, memory: str):
 with get_db() as conn:
-
-    with conn.cursor() as cur:
-
-        cur.execute("""
-            UPDATE users
-            SET memory = %s
-            WHERE user_id = %s
-        """, (
-            memory[:MEMORY_LIMIT],
-            user_id,
-        ))
-
-    conn.commit()
+with conn.cursor() as cur:
+cur.execute("""
+UPDATE users
+SET memory = %s
+WHERE user_id = %s
+""", (
+memory[:MEMORY_LIMIT],
+user_id,
+))
+conn.commit()
 
 def reset_history(user_id: int):
-
 with get_db() as conn:
-
-    with conn.cursor() as cur:
-
-        cur.execute("""
-            DELETE FROM messages
-            WHERE user_id = %s
-        """, (user_id,))
-
-    conn.commit()
+with conn.cursor() as cur:
+cur.execute("""
+DELETE FROM messages
+WHERE user_id = %s
+""", (user_id,))
+conn.commit()
 
 def reset_memory(user_id: int):
-
 with get_db() as conn:
-
-    with conn.cursor() as cur:
-
-        cur.execute("""
-            UPDATE users
-            SET memory = ''
-            WHERE user_id = %s
-        """, (user_id,))
-
-    conn.commit()
-
-=========================================================
-
-MEMORY
-
-=========================================================
+with conn.cursor() as cur:
+cur.execute("""
+UPDATE users
+SET memory = ''
+WHERE user_id = %s
+""", (user_id,))
+conn.commit()
 
 def should_update_memory(text: str) -> bool:
-
-"""
-Не запускаем отдельный запрос Groq после каждого сообщения.
-
-Память обновляется только если сообщение похоже
-на информацию, которую действительно имеет смысл помнить.
-"""
-
 t = text.lower().strip()
 
 if len(t) < 8:
     return False
 
-memory_triggers = (
+triggers = (
     "меня зовут",
     "зови меня",
     "называй меня",
@@ -361,91 +213,49 @@ memory_triggers = (
     "моя система",
 )
 
-if any(
-    phrase in t
-    for phrase in memory_triggers
-):
-    return True
+return any(x in t for x in triggers)
 
-return False
-
-async def update_memory(
-user_id: int,
-text: str,
-):
-
-"""
-Обновляет долговременную память.
-
-В отличие от старой версии функция вызывается
-только для потенциально полезных сообщений.
-"""
-
+async def update_memory(user_id: int, text: str):
 if not should_update_memory(text):
-    return
+return
 
 try:
-
     current_memory = get_memory(user_id)
 
     prompt = f"""
 
-Ты управляешь долговременной памятью пользователя Telegram-бота.
+Ты управляешь долговременной памятью пользователя.
 
 Текущая память:
-{current_memory if current_memory else "(пусто)"}
+{current_memory or "(пусто)"}
 
 Новое сообщение:
 {text[:1200]}
 
-Сохраняй только действительно полезную
-долговременную информацию.
+Сохраняй только полезную долгосрочную информацию:
 
-Можно сохранять:
-
-- имя и предпочитаемое обращение;
-- долгосрочные интересы;
+- имя и обращение;
+- интересы;
 - проекты;
 - устойчивые предпочтения;
-- настройки общения;
-- полезные сведения, которые пригодятся позже.
+- полезные настройки общения.
 
-Не сохраняй:
+Не сохраняй временные задачи, результаты поиска,
+пароли, API-ключи, токены и секреты.
 
-- обычные вопросы;
-- временные задачи;
-- результаты поиска;
-- содержимое сайтов;
-- пароли;
-- API-ключи;
-- токены;
-- секреты;
-- чувствительную личную информацию.
-
-Если сохранять нечего:
+Если сохранять нечего, напиши:
 NO_UPDATE
 
-Если есть новая полезная информация,
-верни полностью обновлённую краткую память.
-
-Без объяснений.
-Максимум 2500 символов.
+Иначе верни полностью обновлённую краткую память.
+Без объяснений. Максимум 2500 символов.
 """
-
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json",
-    }
 
     payload = {
         "model": GROQ_TEXT_MODEL,
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "Ты аккуратно управляешь "
-                    "долговременной памятью."
-                ),
+                "content": "Ты аккуратно управляешь долговременной памятью.",
             },
             {
                 "role": "user",
@@ -456,103 +266,25 @@ NO_UPDATE
         "temperature": 0,
     }
 
-    async with httpx.AsyncClient(
-        timeout=60
-    ) as client:
+    data = await groq_request(payload, 60)
 
-        response = await client.post(
-            GROQ_URL,
-            headers=headers,
-            json=payload,
-        )
+    new_memory = data["choices"][0]["message"]["content"].strip()
 
-        if response.is_error:
-
-            logger.error(
-                "Memory Groq error %s: %s",
-                response.status_code,
-                response.text[:1000],
-            )
-
-            return
-
-        data = response.json()
-
-    try:
-
-        new_memory = (
-            data["choices"][0]["message"]["content"]
-        )
-
-    except (
-        KeyError,
-        IndexError,
-        TypeError,
-    ):
-
-        logger.error(
-            "Unexpected memory response: %s",
-            data,
-        )
-
-        return
-
-    if not new_memory:
-        return
-
-    new_memory = new_memory.strip()
-
-    if not new_memory:
-        return
-
-    if new_memory == "NO_UPDATE":
-        return
-
-    set_memory(
-        user_id,
-        new_memory,
-    )
-
-    logger.info(
-        "Memory updated for user %s",
-        user_id,
-    )
+    if new_memory and new_memory != "NO_UPDATE":
+        set_memory(user_id, new_memory)
+        logger.info("Memory updated for user %s", user_id)
 
 except Exception:
+    logger.exception("Memory update error")
 
-    logger.exception(
-        "MEMORY UPDATE ERROR for user %s",
-        user_id,
-    )
-
-=========================================================
-
-GROQ REQUEST
-
-=========================================================
-
-async def groq_request(
-payload: dict,
-timeout: int = 120,
-):
-
-"""
-Универсальный запрос к Groq.
-
-При 429 ждём немного и пробуем ещё раз.
-"""
-
+async def groq_request(payload: dict, timeout: int = 120):
 headers = {
-    "Authorization": f"Bearer {GROQ_API_KEY}",
-    "Content-Type": "application/json",
+"Authorization": f"Bearer {GROQ_API_KEY}",
+"Content-Type": "application/json",
 }
 
-async with httpx.AsyncClient(
-    timeout=timeout
-) as client:
-
+async with httpx.AsyncClient(timeout=timeout) as client:
     for attempt in range(2):
-
         response = await client.post(
             GROQ_URL,
             headers=headers,
@@ -560,41 +292,28 @@ async with httpx.AsyncClient(
         )
 
         if response.status_code == 429:
-
             logger.warning(
-                "Groq rate limit 429, attempt %s",
+                "Groq rate limit, attempt %s",
                 attempt + 1,
             )
 
             if attempt == 0:
-
                 retry_after = 7
+                value = response.headers.get("retry-after")
 
-                header_value = response.headers.get(
-                    "retry-after"
-                )
-
-                if header_value:
-
+                if value:
                     try:
                         retry_after = max(
                             2,
-                            min(
-                                int(float(header_value)),
-                                15,
-                            ),
+                            min(int(float(value)), 15),
                         )
                     except ValueError:
                         pass
 
-                await asyncio.sleep(
-                    retry_after
-                )
-
+                await asyncio.sleep(retry_after)
                 continue
 
         if response.is_error:
-
             logger.error(
                 "Groq error %s: %s",
                 response.status_code,
@@ -602,149 +321,61 @@ async with httpx.AsyncClient(
             )
 
         response.raise_for_status()
-
         return response.json()
 
-raise RuntimeError(
-    "Groq request failed after retry"
-)
-
-=========================================================
-
-GROQ — ОБЫЧНЫЙ ОТВЕТ
-
-=========================================================
+raise RuntimeError("Groq request failed after retry")
 
 async def ask_groq(
 user_id: int,
 text: str,
-image_b64: str = None,
-model: str = None,
 ):
-
-model = model or GROQ_TEXT_MODEL
-
 history = get_compact_history(user_id)
 memory = get_memory(user_id)
-
-system_prompt = (
-    "Ты дружелюбный ИИ-помощник в Telegram.\n"
-    "Отвечай понятно, естественно и по делу.\n"
-    "Не выдавай непроверенные факты за достоверные.\n\n"
-    "Долговременная память пользователя:\n"
-    + (
-        memory
-        if memory
-        else "Память пока пустая."
-    )
-)
 
 messages = [
     {
         "role": "system",
-        "content": system_prompt,
+        "content": (
+            "Ты дружелюбный ИИ-помощник в Telegram.\n"
+            "Отвечай понятно, естественно и по делу.\n"
+            "Не выдавай непроверенные факты за достоверные.\n\n"
+            "Память пользователя:\n"
+            f"{memory or 'Память пока пустая.'}"
+        ),
     }
 ]
 
 for role, content in history:
-
-    mapped_role = (
-        "assistant"
-        if role == "model"
-        else "user"
-    )
-
     messages.append({
-        "role": mapped_role,
+        "role": "assistant" if role == "model" else "user",
         "content": content,
     })
 
-if image_b64:
-
-    messages.append({
-        "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": text,
-            },
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": (
-                        "data:image/jpeg;base64,"
-                        f"{image_b64}"
-                    )
-                },
-            },
-        ],
-    })
-
-else:
-
-    messages.append({
-        "role": "user",
-        "content": text,
-    })
+messages.append({
+    "role": "user",
+    "content": text,
+})
 
 payload = {
-    "model": model,
+    "model": GROQ_TEXT_MODEL,
     "messages": messages,
     "max_tokens": MAX_OUTPUT_TOKENS,
     "temperature": 0.7,
 }
 
-data = await groq_request(
-    payload
-)
+data = await groq_request(payload)
 
-try:
-
-    answer = (
-        data["choices"][0]["message"]["content"]
-    )
-
-except (
-    KeyError,
-    IndexError,
-    TypeError,
-):
-
-    logger.error(
-        "Unexpected Groq response: %s",
-        data,
-    )
-
-    raise RuntimeError(
-        "Groq returned an unexpected response"
-    )
+answer = data["choices"][0]["message"]["content"]
 
 if not answer:
-
-    raise RuntimeError(
-        "Groq returned an empty response"
-    )
+    raise RuntimeError("Groq returned an empty response")
 
 return answer.strip()
 
-=========================================================
-
-WEB SEARCH DETECTION
-
-=========================================================
-
 def wants_web_search(text: str) -> bool:
-
-"""
-Определяет, нужен ли интернет-поиск.
-
-Теперь понимает не только "поищи",
-но и запросы про актуальные/свежие данные.
-"""
-
 t = text.lower().strip()
 
-explicit_phrases = (
+phrases = (
     "в интернете",
     "в инете",
     "в сети",
@@ -786,13 +417,10 @@ explicit_phrases = (
     "на 2026 год",
 )
 
-if any(
-    phrase in t
-    for phrase in explicit_phrases
-):
+if any(x in t for x in phrases):
     return True
 
-search_words = (
+words = (
     "поищи",
     "погугли",
     "проверь",
@@ -800,52 +428,24 @@ search_words = (
     "найди",
 )
 
-if any(
-    re.search(
-        rf"\b{re.escape(word)}\b",
-        t,
-    )
-    for word in search_words
-):
-    return True
+return any(
+    re.search(rf"\b{re.escape(x)}\b", t)
+    for x in words
+)
 
-return False
-
-=========================================================
-
-FREE SERP SEARCH
-
-=========================================================
-
-async def freeserp_search(
-query: str,
-) -> str:
-
-"""
-Получает свежие результаты FreeSerp.
-
-Результаты специально ограничиваются,
-чтобы не раздувать запрос к Groq.
-"""
-
+async def freeserp_search(query: str) -> str:
 params = {
-    "index": "web",
-    "q": query[:600],
-    "size": WEB_RESULTS_LIMIT,
+"index": "web",
+"q": query[:600],
+"size": WEB_RESULTS_LIMIT,
 }
 
 headers = {
     "Accept": "application/json",
-    "User-Agent": (
-        "OxAlphaAI/1.0 "
-        "(Telegram bot; web search)"
-    ),
+    "User-Agent": "OxAlphaAI/1.0",
 }
 
-async with httpx.AsyncClient(
-    timeout=30
-) as client:
-
+async with httpx.AsyncClient(timeout=30) as client:
     response = await client.get(
         FREE_SERP_URL,
         params=params,
@@ -853,7 +453,6 @@ async with httpx.AsyncClient(
     )
 
 if response.is_error:
-
     logger.error(
         "FreeSerp error %s: %s",
         response.status_code,
@@ -866,61 +465,42 @@ data = response.json()
 
 results = (
     data.get("results")
-    or data.get("web", {}).get(
-        "results",
-        [],
-    )
+    or data.get("web", {}).get("results", [])
 )
 
 if not results:
+    return "FreeSerp не вернул результатов по этому запросу."
 
-    return (
-        "FreeSerp не вернул результатов "
-        "по этому запросу."
-    )
-
-lines = [
-    "Результаты веб-поиска:"
-]
-
-current_length = len(
-    lines[0]
-)
+lines = ["Результаты веб-поиска:"]
+total = len(lines[0])
 
 for i, item in enumerate(
     results[:WEB_RESULTS_LIMIT],
     1,
 ):
-
     title = (
         item.get("title")
         or "Без названия"
-    ).strip()
+    ).strip()[:300]
 
     url = (
         item.get("url")
         or item.get("link")
         or ""
-    ).strip()
+    ).strip()[:500]
 
     description = (
         item.get("snippet")
         or item.get("summary")
         or item.get("description")
         or ""
-    ).strip()
+    ).strip()[:700]
 
     published = (
         item.get("publication_date")
         or item.get("published")
         or ""
-    ).strip()
-
-    # Не даём одному результату разрастись.
-    title = title[:300]
-    url = url[:500]
-    description = description[:700]
-    published = published[:100]
+    ).strip()[:100]
 
     block = (
         f"{i}. {title}\n"
@@ -929,95 +509,52 @@ for i, item in enumerate(
     )
 
     if published:
+        block += f"\nДата публикации: {published}"
 
-        block += (
-            f"\nДата публикации: {published}"
-        )
-
-    if (
-        current_length
-        + len(block)
-        + 2
-        > WEB_CONTEXT_LIMIT
-    ):
+    if total + len(block) + 2 > WEB_CONTEXT_LIMIT:
         break
 
     lines.append(block)
-
-    current_length += (
-        len(block) + 2
-    )
+    total += len(block) + 2
 
 return "\n\n".join(lines)
-
-=========================================================
-
-GROQ — WEB SEARCH
-
-=========================================================
 
 async def ask_groq_with_web(
 user_id: int,
 text: str,
 web_context: str,
 ):
-
 history = get_compact_history(user_id)
 memory = get_memory(user_id)
-
-web_context = web_context[
-    :WEB_CONTEXT_LIMIT
-]
-
-system_prompt = (
-    "Ты дружелюбный ИИ-помощник в Telegram.\n"
-    "Пользователь запросил актуальную информацию.\n"
-    "Ниже приведены результаты веб-поиска.\n"
-    "Используй их как источник актуальных данных.\n"
-    "Не придумывай факты, которых нет в найденных "
-    "данных или которые нельзя логически вывести.\n"
-    "Если информации недостаточно или источники "
-    "противоречат друг другу — скажи об этом.\n"
-    "Для быстро меняющихся данных указывай, "
-    "что информация относится к моменту поиска.\n"
-    "Если уместно, называй сайты-источники.\n\n"
-    "Долговременная память пользователя:\n"
-    + (
-        memory
-        if memory
-        else "Память пока пустая."
-    )
-)
 
 messages = [
     {
         "role": "system",
-        "content": system_prompt,
+        "content": (
+            "Ты дружелюбный ИИ-помощник в Telegram.\n"
+            "Пользователь запросил актуальную информацию.\n"
+            "Используй результаты веб-поиска ниже.\n"
+            "Не придумывай отсутствующие факты.\n"
+            "Если информации недостаточно или источники "
+            "противоречат друг другу, скажи об этом.\n\n"
+            "Память пользователя:\n"
+            f"{memory or 'Память пока пустая.'}"
+        ),
     }
 ]
 
 for role, content in history:
-
-    mapped_role = (
-        "assistant"
-        if role == "model"
-        else "user"
-    )
-
     messages.append({
-        "role": mapped_role,
+        "role": "assistant" if role == "model" else "user",
         "content": content,
     })
 
 messages.append({
     "role": "user",
     "content": (
-        "Запрос пользователя:\n"
-        f"{text[:1500]}\n\n"
-        "Результаты веб-поиска:\n"
-        f"{web_context}\n\n"
-        "Ответь на запрос пользователя, "
-        "опираясь прежде всего на найденные данные."
+        f"Запрос пользователя:\n{text[:1500]}\n\n"
+        f"Результаты веб-поиска:\n"
+        f"{web_context[:WEB_CONTEXT_LIMIT]}"
     ),
 })
 
@@ -1028,58 +565,27 @@ payload = {
     "temperature": 0.4,
 }
 
-data = await groq_request(
-    payload
-)
+data = await groq_request(payload)
 
-try:
-
-    answer = (
-        data["choices"][0]["message"]["content"]
-    )
-
-except (
-    KeyError,
-    IndexError,
-    TypeError,
-):
-
-    logger.error(
-        "Unexpected Groq web response: %s",
-        data,
-    )
-
-    raise RuntimeError(
-        "Groq returned an unexpected response"
-    )
+answer = data["choices"][0]["message"]["content"]
 
 if not answer:
-
-    raise RuntimeError(
-        "Groq returned an empty response"
-    )
+    raise RuntimeError("Groq returned an empty response")
 
 return answer.strip()
 
-=========================================================
-
-TELEGRAM HELPERS
-
-=========================================================
-
 def reset_keyboard():
-
 return InlineKeyboardMarkup([
-    [
-        InlineKeyboardButton(
-            "🧹 Сбросить историю",
-            callback_data="reset_history",
-        ),
-        InlineKeyboardButton(
-            "🧠🗑️ Забыть память",
-            callback_data="reset_memory",
-        ),
-    ]
+[
+InlineKeyboardButton(
+"Сбросить историю",
+callback_data="reset_history",
+),
+InlineKeyboardButton(
+"Забыть память",
+callback_data="reset_memory",
+),
+]
 ])
 
 async def send_long_message(
@@ -1087,64 +593,45 @@ message,
 text: str,
 reply_markup=None,
 ):
-
 max_length = 4000
 
 if len(text) <= max_length:
-
     await message.reply_text(
         text,
         reply_markup=reply_markup,
     )
-
     return
 
 chunks = [
     text[i:i + max_length]
-    for i in range(
-        0,
-        len(text),
-        max_length,
-    )
+    for i in range(0, len(text), max_length)
 ]
 
 for chunk in chunks[:-1]:
-
-    await message.reply_text(
-        chunk
-    )
+    await message.reply_text(chunk)
 
 await message.reply_text(
     chunks[-1],
     reply_markup=reply_markup,
 )
 
-=========================================================
-
-COMMANDS
-
-=========================================================
-
 async def start(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
-
 user_id = update.effective_user.id
-
 ensure_user(user_id)
 
 await update.message.reply_text(
     "Привет! 🧠\n\n"
-    "Я Ox Alpha AI (на Groq).\n\n"
+    "Я Ox Alpha AI на Groq.\n\n"
     "У меня есть:\n"
     "🧠 долговременная память\n"
     "💬 отдельная история для каждого пользователя\n"
     "📸 анализ фото\n"
     "📄 чтение TXT\n"
     "🌐 поиск в интернете\n\n"
-    "Кнопки ниже — быстрый сброс.\n"
-    "Также доступны команды /reset и /forget",
+    "Доступны /reset и /forget.",
     reply_markup=reset_keyboard(),
 )
 
@@ -1152,11 +639,8 @@ async def reset(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
-
 user_id = update.effective_user.id
-
 ensure_user(user_id)
-
 reset_history(user_id)
 
 await update.message.reply_text(
@@ -1169,11 +653,8 @@ async def forget(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
-
 user_id = update.effective_user.id
-
 ensure_user(user_id)
-
 reset_memory(user_id)
 
 await update.message.reply_text(
@@ -1184,17 +665,13 @@ async def button_handler(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
-
 query = update.callback_query
-
 user_id = query.from_user.id
 
 ensure_user(user_id)
-
 await query.answer()
 
 if query.data == "reset_history":
-
     reset_history(user_id)
 
     await query.edit_message_text(
@@ -1203,52 +680,35 @@ if query.data == "reset_history":
     )
 
 elif query.data == "reset_memory":
-
     reset_memory(user_id)
 
     await query.edit_message_text(
         "Долговременная память очищена 🧠🗑️"
     )
 
-=========================================================
-
-TEXT
-
-=========================================================
-
 async def message_handler(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
-
-if (
-    not update.message
-    or not update.message.text
-):
-    return
+if not update.message or not update.message.text:
+return
 
 user_id = update.effective_user.id
 text = update.message.text
 
 ensure_user(user_id)
 
-await update.message.chat.send_action(
-    "typing"
-)
+await update.message.chat.send_action("typing")
 
 try:
-
     if wants_web_search(text):
-
         logger.info(
             "Web search requested by user %s: %s",
             user_id,
             text,
         )
 
-        web_context = await freeserp_search(
-            text
-        )
+        web_context = await freeserp_search(text)
 
         answer = await ask_groq_with_web(
             user_id,
@@ -1257,13 +717,11 @@ try:
         )
 
     else:
-
         answer = await ask_groq(
             user_id,
             text,
         )
 
-    # Сохраняем историю.
     save_message(
         user_id,
         "user",
@@ -1276,31 +734,18 @@ try:
         answer[:10000],
     )
 
-    # Память теперь обновляется
-    # только для потенциально полезных сообщений.
-    try:
-
-        await update_memory(
-            user_id,
-            text,
-        )
-
-    except Exception:
-
-        logger.exception(
-            "MEMORY UPDATE ERROR"
-        )
-
     await send_long_message(
         update.message,
         answer,
     )
 
-except Exception as e:
-
-    logger.exception(
-        "MESSAGE ERROR"
+    await update_memory(
+        user_id,
+        text,
     )
+
+except Exception as e:
+    logger.exception("Message error")
 
     await update.message.reply_text(
         "Ошибка при обращении к модели 😵\n\n"
@@ -1308,50 +753,29 @@ except Exception as e:
         "Подробности есть в логах Render."
     )
 
-=========================================================
-
-PHOTO
-
-=========================================================
-
 async def ask_openrouter_vision(
 user_id: int,
 text: str,
 image_b64: str,
 ):
-
 history = get_compact_history(user_id)
 memory = get_memory(user_id)
-
-system_prompt = (
-    "Ты дружелюбный ИИ-помощник в Telegram.\n"
-    "Отвечай понятно, естественно и по делу.\n"
-    "Не выдавай непроверенные факты за достоверные.\n\n"
-    "Долговременная память пользователя:\n"
-    + (
-        memory
-        if memory
-        else "Память пока пустая."
-    )
-)
 
 messages = [
     {
         "role": "system",
-        "content": system_prompt,
+        "content": (
+            "Ты дружелюбный ИИ-помощник в Telegram.\n"
+            "Отвечай понятно, естественно и по делу.\n\n"
+            "Память пользователя:\n"
+            f"{memory or 'Память пока пустая.'}"
+        ),
     }
 ]
 
 for role, content in history:
-
-    mapped_role = (
-        "assistant"
-        if role == "model"
-        else "user"
-    )
-
     messages.append({
-        "role": mapped_role,
+        "role": "assistant" if role == "model" else "user",
         "content": content,
     })
 
@@ -1368,16 +792,14 @@ messages.append({
                 "url": (
                     "data:image/jpeg;base64,"
                     f"{image_b64}"
-                )
+                ),
             },
         },
     ],
 })
 
 headers = {
-    "Authorization": (
-        f"Bearer {OPENROUTER_API_KEY}"
-    ),
+    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
     "Content-Type": "application/json",
     "HTTP-Referer": RENDER_URL,
     "X-Title": "Ox Alpha AI",
@@ -1389,10 +811,7 @@ payload = {
     "max_tokens": MAX_OUTPUT_TOKENS,
 }
 
-async with httpx.AsyncClient(
-    timeout=120
-) as client:
-
+async with httpx.AsyncClient(timeout=120) as client:
     response = await client.post(
         OPENROUTER_URL,
         headers=headers,
@@ -1400,40 +819,18 @@ async with httpx.AsyncClient(
     )
 
     if response.is_error:
-
         logger.error(
-            "OpenRouter vision error %s: %s",
+            "OpenRouter error %s: %s",
             response.status_code,
             response.text[:2000],
         )
 
     response.raise_for_status()
-
     data = response.json()
 
-try:
-
-    answer = (
-        data["choices"][0]["message"]["content"]
-    )
-
-except (
-    KeyError,
-    IndexError,
-    TypeError,
-):
-
-    logger.error(
-        "Unexpected OpenRouter vision response: %s",
-        data,
-    )
-
-    raise RuntimeError(
-        "OpenRouter returned an unexpected response"
-    )
+answer = data["choices"][0]["message"]["content"]
 
 if not answer:
-
     raise RuntimeError(
         "OpenRouter returned an empty response"
     )
@@ -1444,23 +841,15 @@ async def photo_handler(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
-
-if (
-    not update.message
-    or not update.message.photo
-):
-    return
+if not update.message or not update.message.photo:
+return
 
 user_id = update.effective_user.id
-
 ensure_user(user_id)
 
-await update.message.chat.send_action(
-    "typing"
-)
+await update.message.chat.send_action("typing")
 
 try:
-
     photo = update.message.photo[-1]
 
     telegram_file = await context.bot.get_file(
@@ -1504,55 +893,35 @@ try:
     )
 
 except Exception as e:
-
-    logger.exception(
-        "PHOTO ERROR"
-    )
+    logger.exception("Photo error")
 
     await update.message.reply_text(
         "Не получилось обработать фото 😵\n\n"
         f"Ошибка: {type(e).__name__}"
     )
 
-=========================================================
-
-TXT
-
-=========================================================
-
 async def txt_handler(
 update: Update,
 context: ContextTypes.DEFAULT_TYPE,
 ):
-
-if (
-    not update.message
-    or not update.message.document
-):
-    return
+if not update.message or not update.message.document:
+return
 
 document = update.message.document
-
 filename = document.file_name or ""
 
 if not filename.lower().endswith(".txt"):
-
     await update.message.reply_text(
         "Пока поддерживаются только .txt файлы 📄"
     )
-
     return
 
 user_id = update.effective_user.id
-
 ensure_user(user_id)
 
-await update.message.chat.send_action(
-    "typing"
-)
+await update.message.chat.send_action("typing")
 
 try:
-
     telegram_file = await context.bot.get_file(
         document.file_id
     )
@@ -1562,22 +931,17 @@ try:
     )
 
     if len(file_bytes) > 500_000:
-
         await update.message.reply_text(
             "Файл слишком большой.\n"
             "Максимум сейчас — 500 КБ."
         )
-
         return
 
     try:
-
         file_text = bytes(
             file_bytes
         ).decode("utf-8")
-
     except UnicodeDecodeError:
-
         file_text = bytes(
             file_bytes
         ).decode(
@@ -1585,25 +949,17 @@ try:
             errors="replace",
         )
 
-    caption = (
-        update.message.caption
-        or ""
-    )
-
-    # Не даём TXT раздувать контекст
-    # до безумных размеров.
-    file_text = file_text[:20000]
+    caption = update.message.caption or ""
 
     prompt = (
         "Пользователь отправил TXT-файл.\n\n"
         f"Имя файла:\n{filename}\n\n"
         f"Комментарий:\n{caption[:2000]}\n\n"
         "Содержимое:\n\n"
-        f"{file_text}\n\n"
-        "Проанализируй файл и ответь "
-        "на запрос пользователя. "
-        "Если отдельного запроса нет, "
-        "кратко объясни содержимое файла."
+        f"{file_text[:20000]}\n\n"
+        "Проанализируй файл и ответь на запрос. "
+        "Если отдельного запроса нет, кратко объясни "
+        "содержимое файла."
     )
 
     answer = await ask_groq(
@@ -1629,21 +985,12 @@ try:
     )
 
 except Exception as e:
-
-    logger.exception(
-        "TXT ERROR"
-    )
+    logger.exception("TXT error")
 
     await update.message.reply_text(
         "Не получилось прочитать TXT 😵\n\n"
         f"Ошибка: {type(e).__name__}"
     )
-
-=========================================================
-
-WEBHOOK / WEB APP
-
-=========================================================
 
 application = (
 Application.builder()
@@ -1652,44 +999,30 @@ Application.builder()
 .build()
 )
 
-async def telegram_webhook(
-request: Request,
-):
-
+async def telegram_webhook(request: Request):
 try:
-
-    data = await request.json()
+data = await request.json()
 
     update = Update.de_json(
         data,
         application.bot,
     )
 
-    await application.update_queue.put(
-        update
-    )
+    await application.update_queue.put(update)
 
-    return PlainTextResponse(
-        "OK"
-    )
+    return PlainTextResponse("OK")
 
 except Exception:
-
-    logger.exception(
-        "WEBHOOK ERROR"
-    )
+    logger.exception("Webhook error")
 
     return PlainTextResponse(
         "ERROR",
         status_code=500,
     )
 
-async def health(
-request: Request,
-):
-
+async def health(request: Request):
 return PlainTextResponse(
-    "Ox Alpha AI is alive!"
+"Ox Alpha AI is alive!"
 )
 
 routes = [
@@ -1710,45 +1043,25 @@ methods=["GET"],
 ),
 ]
 
-web_app = Starlette(
-routes=routes
-)
-
-=========================================================
-
-STARTUP / SHUTDOWN
-
-=========================================================
+web_app = Starlette(routes=routes)
 
 async def startup():
-
 init_db()
 
 application.add_handler(
-    CommandHandler(
-        "start",
-        start,
-    )
+    CommandHandler("start", start)
 )
 
 application.add_handler(
-    CommandHandler(
-        "reset",
-        reset,
-    )
+    CommandHandler("reset", reset)
 )
 
 application.add_handler(
-    CommandHandler(
-        "forget",
-        forget,
-    )
+    CommandHandler("forget", forget)
 )
 
 application.add_handler(
-    CallbackQueryHandler(
-        button_handler
-    )
+    CallbackQueryHandler(button_handler)
 )
 
 application.add_handler(
@@ -1773,7 +1086,6 @@ application.add_handler(
 )
 
 await application.initialize()
-
 await application.start()
 
 webhook_url = (
@@ -1787,44 +1099,27 @@ await application.bot.set_webhook(
 )
 
 logger.info(
-    "Telegram webhook set: %s",
+    "Webhook set: %s",
     webhook_url,
 )
 
 logger.info(
-    "Ox Alpha AI started with model: %s",
+    "Ox Alpha AI started: %s",
     GROQ_TEXT_MODEL,
 )
 
-logger.info(
-    "FreeSerp web search: enabled "
-    "(no API key required)"
+async def shutdown():
+try:
+await application.bot.delete_webhook()
+except Exception:
+logger.exception(
+"Failed to delete webhook"
 )
 
-async def shutdown():
-
-try:
-
-    await application.bot.delete_webhook()
-
-except Exception:
-
-    logger.exception(
-        "Failed to delete webhook"
-    )
-
 await application.stop()
-
 await application.shutdown()
 
-=========================================================
-
-RUN
-
-=========================================================
-
 async def main():
-
 await startup()
 
 config = uvicorn.Config(
@@ -1834,16 +1129,11 @@ config = uvicorn.Config(
     log_level="info",
 )
 
-server = uvicorn.Server(
-    config
-)
+server = uvicorn.Server(config)
 
 try:
-
     await server.serve()
-
 finally:
-
     await shutdown()
 
 if name == "main":
