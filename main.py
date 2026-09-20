@@ -48,7 +48,7 @@ WEBHOOK_PATH = f"/telegram/{WEBHOOK_SECRET}"
 # Если хочешь именно V4 Flash 0731 (платно) — раскомментируй:
 # OPENROUTER_MODEL = "deepseek/deepseek-v4-flash-0731"
 # По умолчанию бесплатная модель:
-OPENROUTER_MODEL = "deepseek/deepseek-chat-v3.1:free"
+OPENROUTER_MODEL = "deepseek/deepseek-v4-flash:free"
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
