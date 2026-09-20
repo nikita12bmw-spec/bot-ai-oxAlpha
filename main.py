@@ -46,7 +46,7 @@ PORT = int(os.environ.get("PORT", 10000))
 WEBHOOK_PATH = f"/telegram/{WEBHOOK_SECRET}"
 
 # Основная модель — DeepSeek (не понимает картинки):
-OPENROUTER_MODEL = "deepseek/deepseek-v4-flash"
+OPENROUTER_MODEL = "deepseek/deepseek-chat-v3.1"
 # Отдельная модель только для фото (DeepSeek сам vision не умеет):
 # openrouter/free сам подбирает рабочую бесплатную vision-модель под капотом.
 OPENROUTER_VISION_MODEL = "openrouter/free"
